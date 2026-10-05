@@ -10,9 +10,11 @@ public class StringProcessingBenchmarks
     [Benchmark]
     public string BuildReport()
     {
-        var builder = new System.Text.StringBuilder();
+        // Deliberate regression fixture: repeated immutable concatenation creates
+        // substantially more work and allocations than the baseline StringBuilder version.
+        var report = string.Empty;
         foreach (var value in _values)
-            builder.Append(value).Append('|');
-        return builder.ToString();
+            report += value + "|";
+        return report;
     }
 }
