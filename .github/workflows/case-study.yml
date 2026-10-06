@@ -73,9 +73,19 @@ jobs:
       - name: Measure (baseline A -> candidate -> baseline B)
         run: |
           mkdir -p results
-          ./.tools/perfagent run baseline/PerformanceAgent.RealWorldBenchmarks.csproj  --output results/baseline-a.json
-          ./.tools/perfagent run candidate/PerformanceAgent.RealWorldBenchmarks.csproj --output results/candidate.json
-          ./.tools/perfagent run baseline/PerformanceAgent.RealWorldBenchmarks.csproj  --output results/baseline-b.json
+          measure() { # worktree output
+            if ! ./.tools/perfagent run "$1/PerformanceAgent.RealWorldBenchmarks.csproj" --output "results/$2.json" > "results/$2.log" 2>&1; then
+              cat "results/$2.log"
+              # Surface the failure as an annotation so it is visible without the raw log.
+              echo "::error title=perfagent run failed ($2)::$(tail -c 3000 "results/$2.log" | sed -e 's/%/%25/g' | sed -e ':a;N;$!ba;s/\n/%0A/g')"
+              exit 1
+            fi
+            tail -n 25 "results/$2.log"
+          }
+          dotnet --info | head -20
+          measure baseline  baseline-a
+          measure candidate candidate
+          measure baseline  baseline-b
 
       - name: Verdicts
         run: |
