@@ -77,7 +77,7 @@ jobs:
             if ! ./.tools/perfagent run "$1/PerformanceAgent.RealWorldBenchmarks.csproj" --output "results/$2.json" > "results/$2.log" 2>&1; then
               cat "results/$2.log"
               # Surface the failure as an annotation so it is visible without the raw log.
-              echo "::error title=perfagent run failed ($2)::$(tail -c 3000 "results/$2.log" | sed -e 's/%/%25/g' | sed -e ':a;N;$!ba;s/\n/%0A/g')"
+              echo "::error title=perfagent run failed ($2)::$(grep -iE 'error|fail|warn|exception|not found|unable|could not' "results/$2.log" | grep -v '^   at ' | head -40 | cut -c1-300 | sed -e 's/%/%25/g' | sed -e ':a;N;$!ba;s/\n/%0A/g')"
               exit 1
             fi
             tail -n 25 "results/$2.log"
