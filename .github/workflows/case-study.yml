@@ -64,20 +64,26 @@ jobs:
           echo "PERFAGENT_VERSION=$version" >> "$GITHUB_ENV"
           echo "PERFAGENT_COMMIT=$(git -C performance-agent rev-parse --short HEAD)" >> "$GITHUB_ENV"
 
-      - name: Prepare baseline and candidate worktrees
+      - name: Prepare isolated baseline and candidate clones
+        # Separate clones outside the workspace: BenchmarkDotNet searches upward for the
+        # project file and refuses to build when it finds more than one copy.
         run: |
-          git -C fixture worktree add --detach "$PWD/baseline" "$BASELINE_REF"
-          git -C fixture worktree add --detach "$PWD/candidate" "$CANDIDATE_REF"
+          for role in baseline candidate; do
+            ref=$([ "$role" = baseline ] && echo "$BASELINE_REF" || echo "$CANDIDATE_REF")
+            git clone -q --no-hardlinks fixture "$RUNNER_TEMP/$role/fixture"
+            git -C "$RUNNER_TEMP/$role/fixture" checkout -q --detach "$ref"
+            echo "$role -> $(git -C "$RUNNER_TEMP/$role/fixture" log -1 --format='%h %s')"
+          done
           git -C fixture diff --stat "$BASELINE_REF" "$CANDIDATE_REF" -- '*.cs'
 
       - name: Measure (baseline A -> candidate -> baseline B)
         run: |
           mkdir -p results
           measure() { # worktree output
-            if ! ./.tools/perfagent run "$1/PerformanceAgent.RealWorldBenchmarks.csproj" --output "results/$2.json" > "results/$2.log" 2>&1; then
+            if ! ./.tools/perfagent run "$RUNNER_TEMP/$1/fixture/PerformanceAgent.RealWorldBenchmarks.csproj" --output "results/$2.json" > "results/$2.log" 2>&1; then
               cat "results/$2.log"
               # BenchmarkDotNet writes its own build/run log under BenchmarkDotNet.Artifacts.
-              find / -path '*BenchmarkDotNet.Artifacts/*.log' -newer feed.config 2>/dev/null | while read -r f; do
+              find "$RUNNER_TEMP" "$GITHUB_WORKSPACE" -path '*BenchmarkDotNet.Artifacts/*.log' 2>/dev/null | while read -r f; do
                 echo "::error title=BDN log $(basename "$f")::$( (grep -iE 'error|fail|exception|exit code|not found' "$f" | head -25; echo ---; tail -n 15 "$f") | cut -c1-250 | sed -e 's/%/%25/g' | sed -e ':a;N;$!ba;s/\n/%0A/g')"
               done
               echo "::error title=perfagent log head ($2)::$(head -n 30 "results/$2.log" | cut -c1-250 | sed -e 's/%/%25/g' | sed -e ':a;N;$!ba;s/\n/%0A/g')"
