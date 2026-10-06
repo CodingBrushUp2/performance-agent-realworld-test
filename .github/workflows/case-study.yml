@@ -120,6 +120,9 @@ jobs:
             echo "### No-change control (baseline A vs baseline B), exit $(cat results/control.exit)"
             echo '```'; cat results/control.txt; echo '```'
           } | tee results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          for name in regression control; do
+            echo "::notice title=$name check (exit $(cat results/$name.exit))::$(cut -c1-250 "results/$name.txt" | head -n 40 | sed -e 's/%/%25/g' | sed -e ':a;N;$!ba;s/\n/%0A/g')"
+          done
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
