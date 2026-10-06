@@ -1,0 +1,114 @@
+name: Regression case study
+
+# Measures a known regression with Performance Agent built from source.
+# Baseline, candidate, and a no-change control all run in one job on one runner,
+# interleaved (baseline A -> candidate -> baseline B), so the comparison does not
+# depend on archived evidence from another machine.
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: Fixture commit to use as the baseline
+        default: f7d0e68   # StringBuilder implementation
+      candidate_ref:
+        description: Fixture commit to use as the candidate
+        default: cf8c9ee   # repeated string concatenation (deliberate regression)
+      performance_agent_ref:
+        description: Performance Agent branch, tag, or commit to build
+        default: main
+  push:
+    branches: [main]
+    paths: ['.github/workflows/case-study.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_NOLOGO: 1
+  BASELINE_REF: ${{ inputs.baseline_ref || 'f7d0e68' }}
+  CANDIDATE_REF: ${{ inputs.candidate_ref || 'cf8c9ee' }}
+
+jobs:
+  case-study:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: fixture
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: CodingBrushUp2/performance-agent
+          ref: ${{ inputs.performance_agent_ref || 'main' }}
+          path: performance-agent
+          persist-credentials: false
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        with:
+          global-json-file: performance-agent/global.json
+
+      - name: Build and install perfagent from source
+        run: |
+          dotnet build performance-agent/PerformanceAgent.sln -c Release
+          dotnet pack performance-agent/apps/cli/PerformanceAgent.Cli/PerformanceAgent.Cli.csproj -c Release --no-build -o feed
+          version=$(basename feed/PerformanceAgent.Cli.*.nupkg .nupkg | sed 's/^PerformanceAgent\.Cli\.//')
+          printf '<configuration><packageSources><clear /><add key="local" value="%s" /></packageSources></configuration>' "$PWD/feed" > feed.config
+          dotnet tool install PerformanceAgent.Cli --tool-path .tools --version "$version" --configfile feed.config
+          echo "PERFAGENT_VERSION=$version" >> "$GITHUB_ENV"
+          echo "PERFAGENT_COMMIT=$(git -C performance-agent rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - name: Prepare baseline and candidate worktrees
+        run: |
+          git -C fixture worktree add --detach "$PWD/baseline" "$BASELINE_REF"
+          git -C fixture worktree add --detach "$PWD/candidate" "$CANDIDATE_REF"
+          git -C fixture diff --stat "$BASELINE_REF" "$CANDIDATE_REF" -- '*.cs'
+
+      - name: Measure (baseline A -> candidate -> baseline B)
+        run: |
+          mkdir -p results
+          ./.tools/perfagent run baseline/PerformanceAgent.RealWorldBenchmarks.csproj  --output results/baseline-a.json
+          ./.tools/perfagent run candidate/PerformanceAgent.RealWorldBenchmarks.csproj --output results/candidate.json
+          ./.tools/perfagent run baseline/PerformanceAgent.RealWorldBenchmarks.csproj  --output results/baseline-b.json
+
+      - name: Verdicts
+        run: |
+          cp fixture/performance-budget.json results/
+          check() { # name baseline candidate
+            set +e
+            ./.tools/perfagent check "results/$2.json" "results/$3.json" --budget results/performance-budget.json > "results/$1.txt" 2>&1
+            echo $? > "results/$1.exit"
+            ./.tools/perfagent check "results/$2.json" "results/$3.json" --budget results/performance-budget.json --format json > "results/$1.json" 2>/dev/null
+            set -e
+          }
+          check regression baseline-a candidate
+          check control    baseline-a baseline-b
+          {
+            echo "## Performance Agent regression case study"
+            echo
+            echo "perfagent ${PERFAGENT_VERSION} (\`${PERFAGENT_COMMIT}\`) · fixture baseline \`${BASELINE_REF}\` vs candidate \`${CANDIDATE_REF}\` · runner \`${RUNNER_OS}/${RUNNER_ARCH}\`"
+            echo
+            echo "### Regression check (baseline A vs candidate), exit $(cat results/regression.exit)"
+            echo '```'; cat results/regression.txt; echo '```'
+            echo "### No-change control (baseline A vs baseline B), exit $(cat results/control.exit)"
+            echo '```'; cat results/control.txt; echo '```'
+          } | tee results/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: case-study-results
+          path: results/
+
+      - name: Expectations
+        run: |
+          # The deliberate regression must be caught (FAIL = exit 1).
+          test "$(cat results/regression.exit)" = 1 || { echo "::error::Regression was not detected"; exit 1; }
+          # Re-measuring identical code must not be reported as a regression (PASS=0 or INCONCLUSIVE=2).
+          test "$(cat results/control.exit)" != 1 || { echo "::error::False positive on unchanged code"; exit 1; }
